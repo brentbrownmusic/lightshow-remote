@@ -52,16 +52,28 @@
   .master .val { font-size: 28px; font-weight: 700; }
   input[type=range] { width: 100%; height: 44px; accent-color: var(--accent); margin: 0; }
 
-  .presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  @media (min-width: 420px) { .presets { grid-template-columns: repeat(3, 1fr); } }
-  .preset { text-align: left; background: var(--raised); border: 1.5px solid var(--stroke); border-radius: 12px; padding: 12px; display: grid; gap: 6px; align-content: start; min-height: 96px; }
-  .preset.active { border-color: var(--accent); background: rgba(255,160,46,0.12); }
-  .preset .num { font-size: 22px; font-weight: 700; line-height: 1; }
-  .preset .mode { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Presets are stacked full-width so each row has room for its quick tune controls. */
+  .presets { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .prow { background: var(--raised); border: 1.5px solid var(--stroke); border-radius: 12px; overflow: hidden; }
+  .prow.active { border-color: var(--accent); background: rgba(255,160,46,0.10); }
+  .prow.empty { opacity: 0.35; }
+  .phead { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+  .preset { flex: 1 1 auto; min-width: 0; text-align: left; background: none; padding: 0; display: grid; grid-template-columns: 34px 1fr; grid-template-rows: auto auto; column-gap: 10px; row-gap: 5px; align-items: center; }
+  .preset .num { grid-row: 1 / span 2; font-size: 22px; font-weight: 700; line-height: 1; }
+  .preset .top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .preset .mode { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .preset .sync { font-size: 10px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; white-space: nowrap; }
   .preset .chips { display: flex; gap: 3px; height: 8px; }
   .preset .chips span { flex: 1; border-radius: 3px; }
-  .preset .sync { font-size: 10px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; }
-  .preset:disabled { opacity: 0.35; }
+  .tunebtn { flex: 0 0 auto; height: 36px; padding: 0 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--stroke); font-size: 12px; font-weight: 600; color: var(--muted); }
+  .tunebtn.on, .tunebtn.tweaked { color: var(--accent); }
+  .tune { display: grid; gap: 8px; padding: 4px 12px 12px; border-top: 1px solid var(--stroke); }
+  .tune .lab { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .tune .lab b { color: var(--text); font-weight: 600; }
+  .tune input[type=range] { height: 36px; }
+  .tune .hue { accent-color: auto; background: linear-gradient(to right, hsl(0 90% 55%), hsl(60 90% 55%), hsl(120 90% 55%), hsl(180 90% 55%), hsl(240 90% 55%), hsl(300 90% 55%), hsl(360 90% 55%)); border-radius: 6px; height: 10px; margin-block: 13px; -webkit-appearance: none; appearance: none; }
+  .tune .hue::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; border-radius: 50%; background: #fff; border: 2px solid #111; }
+  .tune .reset { justify-self: end; font-size: 12px; font-weight: 600; color: var(--muted); background: none; padding: 6px 4px; }
 
   .pills { display: flex; gap: 4px; flex-wrap: wrap; }
   .pill { flex: 1 1 auto; background: var(--raised); border-radius: 999px; padding: 8px 6px; font-size: 12px; font-weight: 600; text-align: center; min-width: 40px; }
@@ -567,35 +579,95 @@ function grooveSummary(bs) {
   if (g.hueJourney) parts.push("hue journey"); if ((g.wildness || 0) > 0.001) parts.push("wildness"); if ((g.dynamicsAmount || 0) > 0.001) parts.push("dynamics");
   return parts.length ? "Groove: " + parts.join(" · ") : "Groove: plain division";
 }
+/* ---- Quick tune: per-preset hue shift + saturation, kept on this phone only ---- */
+let tweaks = {};
+try { tweaks = JSON.parse(localStorage.getItem("oml.remote.tweaks") || "{}") || {}; } catch (_) { tweaks = {}; }
+const saveTweaks = () => { try { localStorage.setItem("oml.remote.tweaks", JSON.stringify(tweaks)); } catch (_) {} };
+const tweakOf = i => tweaks[i] || { hue: 0, sat: 0 };
+const isTweaked = i => { const t = tweakOf(i); return Math.abs(t.hue) > 0.5 || Math.abs(t.sat) > 0.005; };
+/* Re-tint every color a preset owns: hue rotates, saturation scales toward 0 or toward 1. */
+function tint(c, t) {
+  const s = clamp01(c.saturation);
+  return { hue: wrapHue(c.hue + t.hue), saturation: clamp01(t.sat >= 0 ? s + (1 - s) * t.sat : s * (1 + t.sat)) };
+}
+function tuned(i) {
+  const p = JSON.parse(JSON.stringify(payload.presets[i])), t = tweakOf(i);
+  if (!isTweaked(i)) return p;
+  p.solid.color = tint(p.solid.color, t);
+  p.gradient.spectrums = p.gradient.spectrums.map(s => ({ ...s, minColor: tint(s.minColor, t), maxColor: tint(s.maxColor, t) }));
+  p.sparkle.color = tint(p.sparkle.color, t);
+  p.novelty.color = tint(p.novelty.color, t);
+  p.pixelFX.colors = p.pixelFX.colors.map(c => tint(c, t));
+  return p;
+}
+/* Live: copy just the colors of the re-tinted preset into the running show. */
+function retintActive() {
+  if (state.preset === null || !state.show) return;
+  const p = tuned(state.preset), s = state.show;
+  s.solid.color = p.solid.color; s.gradient.spectrums = p.gradient.spectrums; s.sparkle.color = p.sparkle.color; s.novelty.color = p.novelty.color; s.pixelFX.colors = p.pixelFX.colors;
+  if (isHardware(s.mode)) { state.programKey = ""; scheduleProgram(); }
+}
+function paintChips(i) {
+  const host = document.querySelector(`#prow${i} .chips`); if (!host) return;
+  host.textContent = "";
+  for (const c of chipColors(tuned(i))) { const sp = document.createElement("span"); sp.style.background = c; host.appendChild(sp); }
+  const btn = document.querySelector(`#prow${i} .tunebtn`); if (btn) btn.classList.toggle("tweaked", isTweaked(i));
+}
+
 function selectPreset(i) {
   const p = payload.presets[i]; if (!p) return;
-  state.preset = i; state.show = JSON.parse(JSON.stringify(p)); state.programKey = "";
+  state.preset = i; state.show = tuned(i); state.programKey = "";
   if (!state.show.beatSync) state.show.beatSync = { enabled: false, division: "quarter" };
   setMaster(typeof p.masterBrightness === "number" ? p.masterBrightness : state.master);
   // Presets carry their full Beat Sync state; on the phone the beat always comes from this device's audio.
   setBeat(!!state.show.beatSync.enabled);
-  document.querySelectorAll(".preset").forEach((el, k) => el.classList.toggle("active", k === i));
+  document.querySelectorAll(".prow").forEach((el, k) => el.classList.toggle("active", k === i));
   renderDivisions(); renderOffsets();
   $("grooveLine").textContent = state.show.beatSync.enabled ? grooveSummary(state.show.beatSync) : "Beat Sync off for this preset — turn it on here to sync to the room.";
   if (isHardware(state.show.mode)) scheduleProgram();
   status("Preset " + (i + 1) + " · " + (MODE_TITLE[state.show.mode] || state.show.mode));
 }
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function renderPresets() {
   const host = $("presets"); host.textContent = "";
   payload.presets.forEach((p, i) => {
-    const btn = document.createElement("button"); btn.className = "preset"; btn.type = "button";
-    const num = document.createElement("div"); num.className = "num"; num.textContent = String(i + 1); btn.appendChild(num);
-    const mode = document.createElement("div"); mode.className = "mode"; btn.appendChild(mode);
-    if (!p) { btn.disabled = true; mode.textContent = "Empty"; }
-    else {
-      mode.textContent = MODE_TITLE[p.mode] || p.mode;
-      const chips = document.createElement("div"); chips.className = "chips";
-      for (const c of chipColors(p)) { const s = document.createElement("span"); s.style.background = c; chips.appendChild(s); }
-      btn.appendChild(chips);
-      if (p.beatSync && p.beatSync.enabled) { const sy = document.createElement("div"); sy.className = "sync"; sy.textContent = "SYNC " + (DIVISIONS.find(d => d.id === p.beatSync.division) || DIVISIONS[4]).title; btn.appendChild(sy); }
-      btn.addEventListener("click", () => selectPreset(i));
-    }
-    host.appendChild(btn);
+    const row = el("div", "prow" + (p ? "" : " empty")); row.id = "prow" + i;
+    const head = el("div", "phead");
+    const btn = el("button", "preset"); btn.type = "button";
+    btn.appendChild(el("div", "num", String(i + 1)));
+    const top = el("div", "top"); btn.appendChild(top);
+    if (!p) { btn.disabled = true; top.appendChild(el("div", "mode", "Empty")); head.appendChild(btn); row.appendChild(head); host.appendChild(row); return; }
+
+    top.appendChild(el("div", "mode", MODE_TITLE[p.mode] || p.mode));
+    if (p.beatSync && p.beatSync.enabled) top.appendChild(el("div", "sync", "SYNC " + (DIVISIONS.find(d => d.id === p.beatSync.division) || DIVISIONS[4]).title));
+    btn.appendChild(el("div", "chips"));
+    btn.addEventListener("click", () => selectPreset(i));
+    head.appendChild(btn);
+
+    // Quick tune: hue shift + saturation for this preset, phone-only, remembered.
+    const tuneBtn = el("button", "tunebtn", "Tune"); tuneBtn.type = "button"; tuneBtn.setAttribute("aria-label", "Tune preset " + (i + 1) + " colors");
+    head.appendChild(tuneBtn);
+    row.appendChild(head);
+
+    const tune = el("div", "tune"); tune.hidden = true;
+    const t = tweakOf(i);
+    const hueLab = el("div", "lab"); hueLab.appendChild(el("span", null, "Hue shift")); const hueVal = el("b", null, Math.round(t.hue) + "°"); hueLab.appendChild(hueVal);
+    const hue = el("input", "hue"); hue.type = "range"; hue.min = -180; hue.max = 180; hue.step = 1; hue.value = t.hue;
+    const satLab = el("div", "lab"); satLab.appendChild(el("span", null, "Saturation")); const satVal = el("b", null, (t.sat >= 0 ? "+" : "") + Math.round(t.sat * 100) + "%"); satLab.appendChild(satVal);
+    const sat = el("input", null); sat.type = "range"; sat.min = -100; sat.max = 100; sat.step = 1; sat.value = Math.round(t.sat * 100);
+    const reset = el("button", "reset", "Reset to Mac colors"); reset.type = "button";
+    const apply = () => {
+      tweaks[i] = { hue: Number(hue.value), sat: Number(sat.value) / 100 };
+      hueVal.textContent = Math.round(tweaks[i].hue) + "°"; satVal.textContent = (tweaks[i].sat >= 0 ? "+" : "") + Math.round(tweaks[i].sat * 100) + "%";
+      saveTweaks(); paintChips(i); if (state.preset === i) retintActive();
+    };
+    hue.addEventListener("input", apply); sat.addEventListener("input", apply);
+    reset.addEventListener("click", () => { hue.value = 0; sat.value = 0; apply(); delete tweaks[i]; saveTweaks(); paintChips(i); });
+    tuneBtn.addEventListener("click", () => { tune.hidden = !tune.hidden; tuneBtn.classList.toggle("on", !tune.hidden); });
+    tune.append(hueLab, hue, satLab, sat, reset);
+    row.appendChild(tune);
+    host.appendChild(row);
+    paintChips(i);
   });
 }
 const OFFSETS = [{ v: 0, title: "In sync" }, { v: 1 / 6, title: "⅙ cycle" }, { v: 1 / 3, title: "⅓ cycle" }, { v: 0.5, title: "Opposite" }];
