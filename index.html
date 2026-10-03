@@ -118,7 +118,10 @@
       <div class="grow"><div class="name" id="nameB">Light B</div><div class="sub" id="subB">not connected</div></div>
       <button class="btn" id="btnB">Connect</button>
     </div>
-    <div class="small muted">Each button opens a Bluetooth prompt — pick the matching tube. Tubes reconnect on their own if they drop while this page is open.</div>
+    <div class="row">
+      <div class="small muted grow">Both tubes show the same name in the picker — pick one for A, the other for B. Quit the Mac app first: a tube takes one connection at a time.</div>
+      <button class="btn" id="swapBtn" title="Colors on the wrong tube? Swap which physical tube is A and which is B">Swap A ↔ B</button>
+    </div>
     <div class="eyebrow" style="margin-top:4px">Light B offset</div>
     <div class="pills" id="offsets"></div>
     <div class="small muted">Light B trails A by this much of each cycle. Each preset recalls the offset it was saved with; tap to change it here.</div>
@@ -270,8 +273,17 @@ class Light {
     this.setState("busy", "choose the tube in the prompt…");
     try {
       const filters = this.name ? [{ name: this.name }] : [{ namePrefix: "NW-" }, { namePrefix: "NEEWER" }, { namePrefix: "NWR" }];
-      this.device = await navigator.bluetooth.requestDevice({ filters, optionalServices: [SERVICE] });
-      this.device.addEventListener("gattserverdisconnected", () => this.onDisconnect());
+      const picked = await navigator.bluetooth.requestDevice({ filters, optionalServices: [SERVICE] });
+      // Both tubes advertise the same name, so the picker can't tell them apart. Refuse a duplicate.
+      const other = lights[this.slot === "a" ? "b" : "a"];
+      if (other.device && other.device.id === picked.id) {
+        this.setState("off", "that's the same tube as Light " + other.slot.toUpperCase() + " — pick the other one");
+        status("Both tubes show the same name in the picker. Pick the other entry for Light " + this.slot.toUpperCase() + ".");
+        return;
+      }
+      this.device = picked;
+      // Looked up at event time so a Swap A ↔ B keeps reconnects on the right slot.
+      picked.addEventListener("gattserverdisconnected", () => { const owner = Object.values(lights).find(L => L.device === picked); if (owner) owner.onDisconnect(); });
       await this.open();
     } catch (e) {
       this.device = null;
@@ -331,6 +343,20 @@ class Light {
   }
 }
 const lights = { a: new Light("a"), b: new Light("b") };
+
+/* Swap which physical tube is A and which is B: the Bluetooth connections
+   trade places, the slot identities (name, MAC, offset role) stay put, and
+   each tube is re-addressed with its new slot's frames. */
+async function swapLights() {
+  const a = lights.a, b = lights.b;
+  for (const k of ["device", "char", "retry", "lastSent", "lastTime", "pending", "busy", "timer"]) { const t = a[k]; a[k] = b[k]; b[k] = t; }
+  for (const L of [a, b]) {
+    L.setState(L.ready ? "on" : (L.device ? "busy" : "off"), L.ready ? (L.mac || "connected") : (L.device ? "reconnecting…" : "not connected"));
+    if (L.ready && L.mac) { try { await L.writeRaw(powerFrame(L.mac, true)); } catch (_) {} onLightReady(L); }
+  }
+  state.programKey = "";
+  status("Swapped: the tube that was A is now B, and vice versa.");
+}
 
 /* ================================================================== *
  *  Audio beat detection (Sync/AudioBeatDetector.swift + BeatClock PLL)
@@ -704,6 +730,7 @@ async function main() {
   }
   $("btnA").addEventListener("click", () => lights.a.connect());
   $("btnB").addEventListener("click", () => lights.b.connect());
+  $("swapBtn").addEventListener("click", swapLights);
   if (!lights.a.mac) { $("btnA").disabled = true; $("subA").textContent = "connect it on the Mac first, then Update Mobile"; }
   if (!lights.b.mac) { $("btnB").disabled = true; $("subB").textContent = "connect it on the Mac first, then Update Mobile"; }
 
