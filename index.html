@@ -265,33 +265,47 @@ async function loadPayload() {
 /* ================================================================== *
  *  Bluetooth — one Light per tube, same pacing rules as LightLink.swift
  * ================================================================== */
+/* Bluefy sometimes rejects with a bare string or an object without .message. */
+const errName = e => (e && typeof e === "object" && e.name) || "";
+const errText = e => { if (!e) return "unknown error"; if (typeof e === "string") return e; return e.message || e.name || (e.toString && e.toString() !== "[object Object]" ? e.toString() : "unknown error"); };
+
 class Light {
   constructor(slot) { this.slot = slot; this.device = null; this.char = null; this.mac = null; this.name = null; this.pending = null; this.lastSent = null; this.lastTime = 0; this.busy = false; this.retry = 0; this.timer = null; }
   get ready() { return !!(this.char && this.device && this.device.gatt && this.device.gatt.connected); }
   async connect() {
     if (!navigator.bluetooth) return;
     this.setState("busy", "choose the tube in the prompt…");
+    let picked = null;
     try {
-      const filters = this.name ? [{ name: this.name }] : [{ namePrefix: "NW-" }, { namePrefix: "NEEWER" }, { namePrefix: "NWR" }];
-      const picked = await navigator.bluetooth.requestDevice({ filters, optionalServices: [SERVICE] });
-      // Both tubes advertise the same name, so the picker can't tell them apart. Refuse a duplicate.
-      const other = lights[this.slot === "a" ? "b" : "a"];
-      if (other.device && other.device.id === picked.id) {
-        this.setState("off", "that's the same tube as Light " + other.slot.toUpperCase() + " — pick the other one");
-        status("Both tubes show the same name in the picker. Pick the other entry for Light " + this.slot.toUpperCase() + ".");
-        return;
-      }
-      this.device = picked;
-      // Looked up at event time so a Swap A ↔ B keeps reconnects on the right slot.
-      picked.addEventListener("gattserverdisconnected", () => { const owner = Object.values(lights).find(L => L.device === picked); if (owner) owner.onDisconnect(); });
-      await this.open();
+      // Match on the Neewer prefix only: the suffix after "&" can differ from
+      // what the Mac recorded, and an exact-name filter would then hide the tube.
+      const filters = [{ namePrefix: "NW-" }, { namePrefix: "NEEWER" }, { namePrefix: "NWR" }, { namePrefix: "NEE" }];
+      picked = await navigator.bluetooth.requestDevice({ filters, optionalServices: [SERVICE] });
     } catch (e) {
-      this.device = null;
-      this.setState("off", e.name === "NotFoundError" ? "no tube chosen" : ("failed: " + e.message));
+      this.setState("off", errName(e) === "NotFoundError" ? "no tube chosen" : ("picker failed: " + errText(e)));
+      return;
     }
+    // Both tubes advertise the same name, so the picker can't tell them apart. Refuse a duplicate.
+    const other = lights[this.slot === "a" ? "b" : "a"];
+    if (other.device && other.device.id === picked.id) {
+      this.setState("off", "that's the same tube as Light " + other.slot.toUpperCase() + " — pick the other one");
+      status("Both tubes show the same name in the picker. Pick the other entry for Light " + this.slot.toUpperCase() + ".");
+      return;
+    }
+    this.device = picked;
+    // Looked up at event time so a Swap A ↔ B keeps reconnects on the right slot.
+    picked.addEventListener("gattserverdisconnected", () => { const owner = Object.values(lights).find(L => L.device === picked); if (owner) owner.onDisconnect(); });
+    // A second GATT connection often fails on the first try in Bluefy; retry a few times before giving up.
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try { await this.open(attempt); return; }
+      catch (e) { lastErr = e; try { this.device.gatt.disconnect(); } catch (_) {} await new Promise(r => setTimeout(r, 700 * attempt)); }
+    }
+    this.device = null; this.char = null;
+    this.setState("off", "failed: " + errText(lastErr) + " — is the Mac app still open? A tube takes one connection at a time.");
   }
-  async open() {
-    this.setState("busy", "connecting…");
+  async open(attempt = 1) {
+    this.setState("busy", attempt > 1 ? `connecting… (try ${attempt})` : "connecting…");
     const server = await this.device.gatt.connect();
     const service = await server.getPrimaryService(SERVICE);
     this.char = await service.getCharacteristic(WRITE);
